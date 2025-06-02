@@ -1,0 +1,140 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB=n8n
+    networks:
+      - postgres
+    volumes:
+      - n8n_postgres_data:/var/lib/postgresql/data
+      - ./backups/postgres:/var/lib/postgresql/backups
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}'
+      interval: 5s
+      timeout: 20s
+      retries: 10
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    restart: unless-stopped
+    environment:
+      - QDRANT__SERVICE__API_KEY
+    ports:
+      - ${QDRANT_PORT}:6333
+    networks:
+      - proxy
+    volumes:
+      - n8n_qdrant_data:/qdrant/storage
+      - ./backups/qdrant:/qdrant/snapshots
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.http.routers.qdrant.rule=Host(`${QDRANT_HOSTNAME:?error}`)
+    #   - traefik.http.routers.qdrant.entrypoints=https
+    #   - traefik.http.routers.qdrant.tls=true
+    #   - traefik.http.routers.qdrant.middlewares=chainNoAuthLowCSP@file
+    #   - traefik.http.services.qdrant.loadbalancer.server.port=6333
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 3
+  crawl4ai:
+    image: unclecode/crawl4ai:basic-amd64
+    container_name: crawl4ai
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    environment:
+      - CRAWL4AI_API_TOKEN
+      - MAX_CONCURRENT_TASKS=1
+    networks:
+      - proxy
+    ports:
+      - ${CRAWL4AI_PORT}:11235
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${CRAWL4AI_PORT}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      crawl4ai:
+        condition: service_healthy
+    environment:
+      - TZ
+      - GENERIC_TIMEZONE=${TZ}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:?error}
+      - DB_POSTGRESDB_SCHEMA=public
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:?error}
+      - N8N_HOST=${N8N_HOSTNAME:?error}
+      - N8N_PORT=${N8N_PORT:?error}
+      - N8N_PROTOCOL=https
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?error}
+      - WEBHOOK_URL=${WEBHOOK_URL:?error}
+    ports:
+      - ${N8N_PORT}:5678
+    networks:
+      - postgres
+      - proxy
+    volumes:
+      - n8n_n8n_data:/home/node/.n8n
+      - ./backups/n8n:/home/node/backups
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.http.routers.n8n.rule=Host(`${N8N_HOSTNAME:?error}`)
+    #   - traefik.http.routers.n8n.entrypoints=https
+    #   - traefik.http.routers.n8n.tls=true
+    #   - traefik.http.routers.n8n.middlewares=chainNoAuthLowCSP@file
+    #   - traefik.http.services.n8n.loadbalancer.server.port=5678
+    #   - "com.centurylinklabs.watchtower.enable=true"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- http://127.0.0.1:5678/'
+      interval: 5s
+      timeout: 20s
+      retries: 10
+
+volumes:
+  n8n_qdrant_data:
+    name: n8n_qdrant_data
+  n8n_n8n_data:
+    name: n8n_n8n_data
+  n8n_postgres_data:
+    name: n8n_postgres_data
+networks:
+  postgres:
+    name: postgres
+    driver: bridge
+    attachable: false
+  proxy:
+    name: proxy
+    driver: bridge
+    external: true
+    attachable: false
